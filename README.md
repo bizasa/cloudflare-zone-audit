@@ -19,6 +19,10 @@ cp -R cloudflare-zone-audit ~/.claude/skills/
 
 Then ask Claude to audit a Cloudflare zone or website using `cloudflare-zone-audit`.
 
+## Background
+
+This skill was created from real-world Cloudflare performance and security audit workflows used on production WordPress sites, including travel and connectivity businesses such as [GIGAGO](https://gigago.com). It focuses on practical settings that affect speed, security, cache safety, and operating cost rather than generic checklist-only advice.
+
 ## Recommended Cloudflare API Token
 
 Use read-only permissions only. Prefer an environment variable or credential file instead of pasting tokens into chat.
