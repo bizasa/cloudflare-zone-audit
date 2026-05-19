@@ -1,6 +1,6 @@
 ---
 name: cloudflare-wp-audit
-version: 1.1.0
+version: 1.2.0
 description: >
   Audit toàn diện cấu hình Cloudflare cho website WordPress / WooCommerce.
   Dùng skill này khi user muốn: kiểm tra Cloudflare của một website, audit
@@ -40,6 +40,15 @@ Thong tin da co tu user message -> bo qua cau hoi tuong ung, nhung VAN PHAI HOI 
 ---
 
 ## CHANGELOG
+
+### v1.2.0 (2026-05)
+**Từ learnings task hanoiparagliding.com audit:**
+- Phase 1: thêm `Zone|Bots|Read` vào read token, quick-verify step, fix tên permissions (WAF không phải Firewall Services)
+- Phase 1: note Auto Minify deprecated (silent no-op), WebP = Pro+ only
+- Phase 2: thêm analytics anomaly detection (traffic spike, ipClassMap, country anomaly)
+- Phase 4: write token verify step trước khi apply, Rate Limiting Free plan constraints (period=10s, timeout=10s, ip.src only)
+- Phase 4: Ruleset GET→merge→PUT pattern bắt buộc
+- CF Monitor: dual-account setup, D1 insert là bước chính, worker token scope
 
 ### v1.1.0 (2025-05)
 **Thêm mới:**
@@ -197,19 +206,39 @@ Pro + WP+Woo + WP Rocket + SG origin + Token có sẵn
 
 ### Path A — API-backed (khi có token)
 
-**Token permissions tối thiểu cần tạo:**
+**Token permissions tối thiểu cần tạo (tên chính xác trong CF Dashboard 2026):**
 ```
-Zone → Zone → Read
-Zone → Analytics → Read
-Zone → Settings → Read
+Zone → Zone Settings → Read
+Zone → Analytics → Read       ← BẮT BUỘC cho GraphQL, thường bị bỏ quên
 Zone → Cache Rules → Read
 Zone → Page Rules → Read
-Zone → WAF → Read           ← optional, bỏ qua nếu 403
-DNS → Read                  ← cho DNS audit module
-Account Settings → Read     ← nếu cần review Argo/billing
+Zone → WAF → Read             ← optional, bỏ qua nếu 403 (tên cũ "Firewall Services" đã đổi thành "WAF")
+Zone → Bots → Read            ← để đọc Bot Fight Mode (nếu thiếu → null, không phải off)
+DNS → DNS → Read              ← cho DNS audit module
+Account Settings → Read       ← nếu cần review Argo/billing
 ```
 → Zone Resources: Include → Specific zone → [domain cụ thể]
 → TTL: 7 ngày (bảo mật)
+
+**⚠️ Nếu setting trả về `null` thay vì on/off → token thiếu quyền, KHÔNG phải setting đang off**
+
+**Quick verify sau khi nhận token — chạy trước khi pull data:**
+```bash
+# Test Analytics access (thường bị thiếu nhất)
+curl -s -X POST "https://api.cloudflare.com/client/v4/graphql" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"query":"{ viewer { zones(filter:{zoneTag:\"ZONE_ID\"}) { httpRequests1dGroups(limit:1, filter:{date_geq:\"2026-01-01\",date_leq:\"2026-01-01\"}) { sum { requests } } } } }"}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('✅ Analytics OK' if not d.get('errors') else '❌ FAIL — thêm Zone|Analytics|Read')"
+
+# Test Bot Fight Mode access
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.cloudflare.com/client/v4/zones/ZONE_ID/settings/bot_fight_mode" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+r=d.get('result')
+if r is None: print('⚠️ Bot Fight Mode: null — thiếu Zone|Bots|Read, hỏi user trực tiếp')
+elif d.get('success'): print('✅ Bot Fight Mode:', r.get('value'))
+"
+```
 
 Chạy `references/pull_data.py TOKEN ZONE_ID`, lưu output vào `cf_audit_data.json`.
 
@@ -220,6 +249,8 @@ Chạy `references/pull_data.py TOKEN ZONE_ID`, lưu output vào `cf_audit_data.
     rocket_loader, browser_cache_ttl, early_hints, security_level,
     always_use_https, automatic_https_rewrites, tls_1_3, min_tls_version,
     zero_rtt, email_obfuscation, hotlink_protection, opportunistic_encryption)
+    NOTE: minify → CF Auto Minify deprecated (API returns success:true nhưng không có tác dụng — skip)
+    NOTE: webp → editable:false trên Free plan (chỉ Polish lossy bật được, WebP cần Pro+)
 3.  Cache Rules
 4.  Configuration Rules
 5.  WAF Custom Rules         ← bỏ qua nếu 403, ghi NO_PERMISSION
@@ -304,6 +335,13 @@ Chi tiết scoring từng category → `references/analysis_guide.md`
 | SBFM | plan = Pro+ | ❌ cần token |
 | Tracking pixel risk | has_tracking = true | ✅ from intake |
 
+**Analytics anomaly detection (tự động trong Phase 2):**
+Sau khi pull 30-day data, so sánh:
+- Max daily requests vs median daily requests → nếu max/median > 5x: flag "⚠️ Traffic spike — possible bot attack"
+- `ipClassMap.noRecord` > 80% tổng requests → flag bot traffic
+- Top countries không liên quan đến business context → flag suspicious
+- Cache hit rate < 5% dù có Cache Rules → điều tra Set-Cookie hoặc bot làm sụt hit rate
+
 **Scoring có điều kiện:**
 - Free plan: không trừ điểm vì thiếu APO, Polish, SBFM — mark `[N/A — cần Pro]`
 - Path B: không score modules cần token — note `[Cần token để confirm]`
@@ -334,6 +372,26 @@ Tạo tại: dash.cloudflare.com/profile/api-tokens
 
 Token sẽ được dùng để apply, sau đó bạn nên revoke ngay.
 Cung cấp write token khi sẵn sàng.
+
+**Verify write token ngay sau khi nhận (trước khi apply bất cứ thứ gì):**
+```bash
+# Test PATCH đơn giản — nếu fail → dừng, yêu cầu user sửa permissions
+curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/ZONE_ID/settings/security_level" \
+  -H "Authorization: Bearer $WRITE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"value":"medium"}' | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+if d.get('success'): print('✅ Write token OK — Zone Settings:Edit working')
+else: print('❌ FAIL:', d.get('errors'), '\n→ Check: Zone Settings:Edit, WAF:Edit, Cache Rules:Edit, Transform Rules:Edit')
+"
+```
+**Permissions cần thiết (tên chính xác CF Dashboard 2026):**
+```
+Zone → Zone Settings → Edit
+Zone → WAF → Edit              ← KHÔNG phải "Firewall Services" (tên cũ)
+Zone → Cache Rules → Edit
+Zone → Transform Rules → Edit
+Zone → Firewall Services → Edit ← cho Rate Limiting (nếu cần)
+```
 ```
 
 **Nếu user không muốn cấp write token:** Output checklist dạng step-by-step manual để user tự làm trên dashboard.
@@ -359,6 +417,20 @@ Từ kết quả Phase 2 (analysis), build `checklist.json` theo format:
   }
 ]
 ```
+
+**Rate Limiting — Free plan constraints (2026):**
+```
+characteristics: ["cf.colo.id", "ip.src"]   ← cf.unique_visitor_id cần Advanced Rate Limiting (Pro+)
+period: 10                                   ← chỉ 10s, không phải 60s
+mitigation_timeout: 10                       ← chỉ 10s, không phải 600s
+```
+Muốn period 60s+ hoặc visitor-based tracking → cần CF Pro + Advanced Rate Limiting add-on
+
+**⚠️ Ruleset PUT thay thế toàn bộ — pattern bắt buộc: GET → merge → PUT**
+Trước khi PUT bất kỳ ruleset nào (Cache Rules, Transform Rules, WAF Custom, Rate Limiting):
+1. GET ruleset hiện tại để lấy existing rules + existing IDs
+2. Merge rules mới vào array (giữ nguyên `id` của rules cũ)
+3. PUT toàn bộ array — không PUT chỉ rule mới (sẽ xóa hết rules cũ)
 
 **Action types hỗ trợ:**
 - `zone_setting` — PATCH zone setting đơn giản (ssl, brotli, http2, security_level...)
