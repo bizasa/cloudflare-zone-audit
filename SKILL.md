@@ -466,95 +466,115 @@ Script này tự động:
 
 ## CF Monitor Integration
 
-**Sau khi audit xong zone mới**, kiểm tra và cập nhật dashboard CF Monitor tại `https://cf-monitor.bizasa.com`.
+**Sau khi audit xong zone mới**, thêm zone vào dashboard CF Monitor tại `https://cf-monitor.bizasa.com`.
 
-### Quy trình
+### Kiến trúc hệ thống (quan trọng — đọc trước)
 
-**Bước 1 — Kiểm tra zone đã có trong dashboard chưa:**
-Mở source HTML tại `pages.bizasa.com/cf-monitor.html` và tìm trong mảng `ZONES`:
-```javascript
-const ZONES = [ ... ]
-```
-Nếu domain đã có → không cần làm gì.
+CF Monitor gồm 2 thành phần **tách biệt trên 2 Cloudflare account khác nhau**:
 
-**Bước 2 — Nếu zone chưa tồn tại, thêm vào:**
+| Thành phần | Account | Project/Worker | Token cần |
+|-----------|---------|----------------|-----------|
+| **Frontend HTML** | `chuannguyen@vietnambiz.com` (ID: `71406b0b9ba6e16b7016960e084014a7`) | Pages project: `cf-monitor` · domain: `cf-monitor.bizasa.com` | CF Pages token (account này) |
+| **Backend Worker + D1 DB** | `chuannguyen@vietnambiz.com` (ID: `71406b0b9ba6e16b7016960e084014a7`) | Worker: `cf-monitor` · D1: `d48c3265-1df6-4b17-b872-c4543c95fc30` | CF Worker token |
 
-Fetch HTML hiện tại, thêm entry vào mảng `ZONES`, deploy lại:
+**KHÔNG nhầm** với account chính (`06ba7667bbfdb1b7059e279c130acc8d`) dùng cho `pages-bizasa` / `pages.bizasa.com` — đó là account khác.
 
-```python
-# Fetch current HTML
-import urllib.request
-req = urllib.request.Request("https://cf-monitor.bizasa.com/")
-with urllib.request.urlopen(req) as r:
-    html = r.read().decode()
+Token để deploy:
+- **CF Worker token** (deploy HTML + thao tác D1): cần xin từ user, đây là token account `chuannguyen@vietnambiz.com`
+- Worker này cần có secret `CF_API_TOKEN` với quyền `Zone | Analytics | Read` cho **tất cả zones được monitor** — nếu thêm zone mới ở account khác, cần update secret này.
 
-# Thêm zone mới vào mảng ZONES (tìm comment placeholder)
-new_zone = """  {
-    id: 'ZONE_ID_MOI',
-    name: 'domain-moi.com',
-    baseline: null   // set sau khi có đủ data
-  },"""
+---
 
-html = html.replace(
-    "  // ── THÊM ZONE MỚI Ở ĐÂY ──────────────────────────────────",
-    f"  // ── THÊM ZONE MỚI Ở ĐÂY ──────────────────────────────────\n{new_zone}"
-)
-```
+### Quy trình thêm zone mới (3 bước bắt buộc)
 
-Sau đó deploy theo quy trình Cloudflare Pages chuẩn.
+**Bước 1 — Insert zone vào D1 Database**
 
-**Bước 3 — Set baseline sau khi có data:**
-
-Sau 2–3 snapshots đầu tiên của zone mới, update `baseline` từ `null` sang object thực tế:
-```javascript
-baseline: {
-  date: 'YYYY-MM-DD',           // ngày audit
-  hit_rate_bytes: XX.X,          // từ CF analytics
-  hit_rate_req: XX.X,
-  total_gb_7d: XX.XX,
-  argo_monthly_est: XX.XX,       // 0 nếu không dùng Argo
-  cn_gb_7d: X.XX,
-  tor_gb_7d: X.XX,
-}
-```
-
-### Thực thi bằng bash_tool
-
-Khi cần thêm zone mới vào cf-monitor, chạy script sau (điền ZONE_ID và DOMAIN_NAME):
+Đây là bước quan trọng nhất — worker đọc danh sách zone từ D1, không phải từ HTML.
 
 ```bash
-# 1. Fetch HTML hiện tại
-curl -s "https://cf-monitor.bizasa.com/" -o /home/claude/site/cf-monitor.html
+CF_WORKER_TOKEN="<token>"
+CF_ACCOUNT_ID="71406b0b9ba6e16b7016960e084014a7"
+DB_ID="d48c3265-1df6-4b17-b872-c4543c95fc30"
+ZONE_ID="<zone_id_cần_thêm>"
+DOMAIN="<domain.com>"
 
-# 2. Thêm zone vào ZONES array (dùng sed hoặc python)
-python3 << 'PYEOF'
-with open('/home/claude/site/cf-monitor.html', 'r') as f:
-    html = f.read()
+# Check zone đã có chưa
+curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
+  -H "Authorization: Bearer $CF_WORKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT * FROM zones"}' | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+for r in d['result'][0].get('results',[]): print(r)
+"
 
-new_entry = """  {
-    id: 'ZONE_ID',
-    name: 'DOMAIN_NAME',
-    baseline: null
-  },
-  // ── THÊM ZONE MỚI Ở ĐÂY ──────────────────────────────────"""
-
-html = html.replace(
-    "  // ── THÊM ZONE MỚI Ở ĐÂY ──────────────────────────────────",
-    new_entry
-)
-with open('/home/claude/site/cf-monitor.html', 'w') as f:
-    f.write(html)
-print("✅ Zone added")
-PYEOF
-
-# 3. Deploy
-CLOUDFLARE_API_TOKEN="CF_PAGES_TOKEN_HERE" \
-CLOUDFLARE_ACCOUNT_ID="${CF_ACCOUNT_ID}" \
-npx wrangler pages deploy /home/claude/site --project-name=pages-bizasa
+# Insert nếu chưa có
+curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
+  -H "Authorization: Bearer $CF_WORKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"sql\":\"INSERT OR IGNORE INTO zones (zone_id, zone_name, active) VALUES ('$ZONE_ID', '$DOMAIN', 1)\"}" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+print('✅ Inserted' if d.get('success') else '❌', d.get('errors',''))
+"
 ```
 
-**URL sau deploy:** `https://cf-monitor.bizasa.com/cf-monitor.html`
-(hoặc nếu đã set custom domain: `https://cf-monitor.bizasa.com`)
+**Bước 2 — Update HTML dropdown và deploy lên Pages**
+
+```bash
+# Fetch HTML hiện tại từ đúng domain
+curl -s "https://cf-monitor.bizasa.com/" -o /tmp/cfm.html
+
+# Thêm option vào select dropdown
+python3 << 'PYEOF'
+with open('/tmp/cfm.html', 'r') as f:
+    html = f.read()
+
+# Tìm option cuối cùng trong select và thêm sau
+import re
+last_option = list(re.finditer(r'<option value="[^"]+">.*?</option>', html))[-1]
+insert_pos = last_option.end()
+new_option = f'\n      <option value="{ZONE_ID}">{DOMAIN}</option>'
+html = html[:insert_pos] + new_option + html[insert_pos:]
+
+with open('/home/claude/cfm-site/index.html', 'w') as f:
+    f.write(html)
+print("✅ HTML updated")
+PYEOF
+
+# Deploy lên CF Pages project cf-monitor (account vietnambiz)
+CLOUDFLARE_API_TOKEN="$CF_WORKER_TOKEN" \
+CLOUDFLARE_ACCOUNT_ID="71406b0b9ba6e16b7016960e084014a7" \
+npx wrangler pages deploy /home/claude/cfm-site --project-name=cf-monitor
+```
+
+**Bước 3 — Trigger worker collect snapshot đầu tiên**
+
+```bash
+# Trigger manual run
+curl -s "https://cf-monitor.chuannguyen.workers.dev/run"
+# Kết quả mong đợi: "Monitor ran successfully"
+
+# Verify snapshot đã có data (không phải toàn 0)
+curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
+  -H "Authorization: Bearer $CF_WORKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"sql\":\"SELECT zone_id, snapshot_date, hit_rate_bytes, total_gb, total_requests FROM snapshots WHERE zone_id='$ZONE_ID' ORDER BY created_at DESC LIMIT 1\"}" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+for r in d['result'][0].get('results',[]): print(r)
+"
+```
+
+⚠️ **Nếu snapshot toàn 0**: worker secret `CF_API_TOKEN` không có quyền đọc analytics zone này.
+→ Cần update secret với token có `Zone | Analytics | Read` cho zone mới.
+→ Nếu zone thuộc account khác với account chính của worker, phải dùng **global API token** hoặc token có multi-zone access.
+→ Workaround: update snapshot thủ công bằng data từ audit (xem bên dưới).
+
+```bash
+# Workaround: update snapshot thủ công với data từ Phase 1 analytics
+curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/$DB_ID/query" \
+  -H "Authorization: Bearer $CF_WORKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"sql\":\"UPDATE snapshots SET total_gb=TOTAL_GB, cached_gb=CACHED_GB, total_requests=TOTAL_REQ, cached_requests=CACHED_REQ, hit_rate_bytes=HIT_RATE_BYTES, hit_rate_req=HIT_RATE_REQ, avg_gb_per_day=AVG_GB_DAY, waf_block_total=THREATS WHERE zone_id='$ZONE_ID' AND snapshot_date='$(date +%Y-%m-%d)'\"}"
+```
 
 ---
 
