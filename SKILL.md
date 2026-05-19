@@ -1,6 +1,6 @@
 ---
 name: cloudflare-wp-audit
-version: 1.2.0
+version: 1.3.0
 description: >
   Audit toàn diện cấu hình Cloudflare cho website WordPress / WooCommerce.
   Dùng skill này khi user muốn: kiểm tra Cloudflare của một website, audit
@@ -40,6 +40,14 @@ Thong tin da co tu user message -> bo qua cau hoi tuong ung, nhung VAN PHAI HOI 
 ---
 
 ## CHANGELOG
+
+### v1.3.0 (2026-05)
+**Workflow improvements:**
+- Q7–Q10 intake: collect đủ READ + WRITE token ngay từ đầu, không hỏi giữa chừng
+- CF Monitor worker token: chỉ hỏi ở Phase 5 (publish), không hỏi sớm
+- Phase 1 reorder: pull analytics (30d GraphQL + TTFB + cache headers) TRƯỚC settings
+- Analytics → định hướng priority order cho audit (cache/performance/security/bot)
+- Token security note: rõ ràng collect-all-upfront policy
 
 ### v1.2.0 (2026-05)
 **Từ learnings task hanoiparagliding.com audit:**
@@ -122,31 +130,55 @@ Q6. Origin server (hosting) đặt ở đâu?
     [ ] US / EU
     [ ] Không rõ
 
-Q7. Bạn có API token Cloudflare không?
-    [ ] Có — tôi sẽ cung cấp token + Zone ID
-    [ ] Chưa có — hướng dẫn tôi tạo
-    [ ] Không muốn dùng — chạy black-box check thay thế
-
-Q8. Website có chạy quảng cáo tracking không?
+Q7. Website có chạy quảng cáo tracking không?
     [ ] Có — Facebook Pixel / Google Tag / TikTok Pixel
     [ ] Không
     [ ] Không rõ
 
-Q9. Website đã từng bị tấn công / DDoS / brute-force chưa?
+Q8. Website đã từng bị tấn công / DDoS / brute-force chưa?
     [ ] Có — gần đây (< 6 tháng)
     [ ] Có — lâu rồi
     [ ] Chưa bao giờ / Không rõ
 
-Q10. Domain, Zone ID, và Token (nếu có):
+Q9. Domain và Zone ID:
     - Domain: _______________
     - Zone ID: _______________ (Dashboard → chọn domain → sidebar phải)
-    - API Token: _______________ (hoặc path env var: CF_API_TOKEN)
-    → Lưu ý: Dùng token read-only. Revoke sau khi audit xong tại
-      dash.cloudflare.com/profile/api-tokens
+
+Q10. Tokens — cung cấp đủ 2 token ngay từ đầu để audit không bị gián đoạn:
+
+    READ TOKEN (bắt buộc — tạo tại dash.cloudflare.com/profile/api-tokens → Custom Token):
+      Permissions:
+        Zone → Zone Settings → Read
+        Zone → Analytics    → Read   ← quan trọng, thường bị bỏ quên
+        Zone → Cache Rules  → Read
+        Zone → Page Rules   → Read
+        Zone → WAF          → Read
+        Zone → Bots         → Read
+        DNS  → DNS          → Read
+      Zone Resources: Include → Specific zone → [domain]
+      TTL: 7 ngày
+    → Read Token: _______________
+
+    WRITE TOKEN (bắt buộc nếu muốn auto-apply — tạo Custom Token riêng):
+      Permissions:
+        Zone → Zone Settings    → Edit
+        Zone → WAF              → Edit
+        Zone → Cache Rules      → Edit
+        Zone → Transform Rules  → Edit
+        Zone → Firewall Services → Edit   ← cho Rate Limiting
+      Zone Resources: Include → Specific zone → [domain]
+      TTL: 1 ngày (revoke ngay sau khi apply xong)
+    → Write Token: _______________ (hoặc để trống nếu muốn làm thủ công)
+
+    Lưu ý: Revoke cả 2 token ngay sau khi audit + apply xong.
+    CF Monitor worker token sẽ được hỏi ở bước cuối (Phase 5) nếu cần publish.
 ```
 
-**Token security note:** Ưu tiên dùng env var `CF_API_TOKEN` thay vì paste thẳng vào chat.
-Nếu user paste token vào chat → nhắc revoke ngay sau khi audit hoàn tất.
+**Token security note:**
+- Ưu tiên dùng env var `CF_API_TOKEN` thay vì paste thẳng vào chat
+- Nếu user paste token vào chat → nhắc revoke ngay sau khi xong
+- Collect đủ READ + WRITE token ở Q10 — KHÔNG hỏi thêm token giữa chừng trong audit
+- CF Monitor worker token → chỉ hỏi ở Phase 5 (publish step), không hỏi sớm hơn
 
 ---
 
@@ -182,8 +214,12 @@ SECURITY_PRIORITY:
   Bình thường           → giữ thứ tự mặc định (Performance → Cache → Security)
 
 TRACKING_RISK:
-  Có Pixel/Tag    → cần cẩn thận Bot Fight Mode + Rocket Loader
-  Không có        → không cần flag tracking risk
+  Có Pixel/Tag (Q7) → cần cẩn thận Bot Fight Mode + Rocket Loader
+  Không có          → không cần flag tracking risk
+
+WRITE_TOKEN:
+  Có sẵn (Q10)  → chuẩn bị apply list sau Phase 3
+  Không có      → output checklist thủ công, user tự làm trên dashboard
 ```
 
 **Ví dụ profile:**
@@ -242,15 +278,40 @@ elif d.get('success'): print('✅ Bot Fight Mode:', r.get('value'))
 
 Chạy `references/pull_data.py TOKEN ZONE_ID`, lưu output vào `cf_audit_data.json`.
 
-**Data cần pull (có điều kiện):**
+**Data cần pull — theo thứ tự (analytics TRƯỚC để định hướng audit):**
+
+**BƯỚC 1 — Analytics trước (định hướng toàn bộ audit):**
+```
+A1. 30-day traffic analytics (GraphQL):
+    - Total requests, cached requests, hit rate (bytes + requests)
+    - Total bandwidth, cached bandwidth
+    - Threats blocked
+    - Per-day breakdown → detect traffic spike (max/median > 5x = bot attack)
+    - ipClassMap: noRecord, badHost, tor → noRecord > 80% = bot traffic
+    - Country breakdown → countries không liên quan business = suspicious
+    - pageViews → estimate human traffic thực
+
+A2. HTTP external checks (black-box):
+    - TTFB (5 lần đo) → baseline origin speed
+    - Cache status trên homepage, static assets, wp-content
+    - Security headers hiện có
+    - Redirect chain
+```
+→ Từ analytics data: xác định **priority order** cho audit:
+  - Cache hit rate < 10% → Cache là P1
+  - TTFB > 1s uncached → Performance/Origin là P1
+  - Threats > 10K/30d hoặc spike → Security là P1
+  - Bot traffic chiếm > 50% → WAF/Bot là P1
+
+**BƯỚC 2 — Settings pull (dựa trên priority từ analytics):**
 ```
 1.  Zone info + plan
-2.  Zone settings (brotli, minify, polish, webp, ssl, http2, http3,
+2.  Zone settings (brotli, polish, webp, ssl, http2, http3,
     rocket_loader, browser_cache_ttl, early_hints, security_level,
     always_use_https, automatic_https_rewrites, tls_1_3, min_tls_version,
     zero_rtt, email_obfuscation, hotlink_protection, opportunistic_encryption)
-    NOTE: minify → CF Auto Minify deprecated (API returns success:true nhưng không có tác dụng — skip)
-    NOTE: webp → editable:false trên Free plan (chỉ Polish lossy bật được, WebP cần Pro+)
+    NOTE: minify → CF Auto Minify deprecated (silent no-op — skip)
+    NOTE: webp → editable:false trên Free plan (Polish lossy OK, WebP cần Pro+)
 3.  Cache Rules
 4.  Configuration Rules
 5.  WAF Custom Rules         ← bỏ qua nếu 403, ghi NO_PERMISSION
@@ -260,8 +321,7 @@ Chạy `references/pull_data.py TOKEN ZONE_ID`, lưu output vào `cf_audit_data.
 9.  Argo Smart Routing       ← chỉ nếu profile cần Argo audit
 10. Tiered Cache settings
 11. Cache Reserve settings
-12. 30-day traffic analytics (GraphQL)
-13. DNS records [MỚI v1.1]  ← A, AAAA, MX, TXT, CNAME, CAA, DS
+12. DNS records ← A, AAAA, MX, TXT, CNAME, CAA, DS
 ```
 
 ---
