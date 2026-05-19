@@ -26,10 +26,10 @@ Audit Cloudflare zone cho WordPress/WooCommerce theo 5 phase:
 Du user cung cap domain, zone ID, hay token ngay tu dau — van phai hoi du 10 cau intake truoc khi lam bat cu dieu gi khac. Domain khong phai la thong tin du de bat dau audit.
 
 SAI — nhay thang vao hoi token:
-  "De audit hanoiparagliding.com, minh can API Token va Zone ID..."
+  "De audit <DOMAIN>, minh can API Token va Zone ID..."
 
 DUNG — hoi intake day du:
-  "De audit dung cach, minh can them mot chut context ve hanoiparagliding.com truoc nhe..."
+  "De audit dung cach, minh can them mot chut context ve <DOMAIN> truoc nhe..."
   -> Hien thi 10 cau hoi intake
 
 Ly do: Khong biet plan (Free/Pro), site type (WP/Woo), plugin cache, origin location
@@ -50,7 +50,7 @@ Thong tin da co tu user message -> bo qua cau hoi tuong ung, nhung VAN PHAI HOI 
 - Token security note: rõ ràng collect-all-upfront policy
 
 ### v1.2.0 (2026-05)
-**Từ learnings task hanoiparagliding.com audit:**
+**Từ learnings task <DOMAIN> audit:**
 - Phase 1: thêm `Zone|Bots|Read` vào read token, quick-verify step, fix tên permissions (WAF không phải Firewall Services)
 - Phase 1: note Auto Minify deprecated (silent no-op), WebP = Pro+ only
 - Phase 2: thêm analytics anomaly detection (traffic spike, ipClassMap, country anomaly)
@@ -606,13 +606,13 @@ CF Monitor gồm 2 thành phần **tách biệt trên 2 Cloudflare account khác
 
 | Thành phần | Account | Project/Worker | Token cần |
 |-----------|---------|----------------|-----------|
-| **Frontend HTML** | `chuannguyen@vietnambiz.com` (ID: `71406b0b9ba6e16b7016960e084014a7`) | Pages project: `cf-monitor` · domain: `cf-monitor.bizasa.com` | CF Pages token (account này) |
-| **Backend Worker + D1 DB** | `chuannguyen@vietnambiz.com` (ID: `71406b0b9ba6e16b7016960e084014a7`) | Worker: `cf-monitor` · D1: `d48c3265-1df6-4b17-b872-c4543c95fc30` | CF Worker token |
+| **Frontend HTML** | `<CF_MONITOR_ACCOUNT_EMAIL>` (ID: `<CF_ACCOUNT_ID_MONITOR>`) | Pages project: `cf-monitor` · domain: `cf-monitor.bizasa.com` | CF Pages token (account này) |
+| **Backend Worker + D1 DB** | `<CF_MONITOR_ACCOUNT_EMAIL>` (ID: `<CF_ACCOUNT_ID_MONITOR>`) | Worker: `cf-monitor` · D1: `<CF_MONITOR_D1_ID>` | CF Worker token |
 
-**KHÔNG nhầm** với account chính (`06ba7667bbfdb1b7059e279c130acc8d`) dùng cho `pages-bizasa` / `pages.bizasa.com` — đó là account khác.
+**KHÔNG nhầm** với account chính (`<CF_ACCOUNT_ID_MAIN>`) dùng cho `pages-bizasa` / `pages.bizasa.com` — đó là account khác.
 
 Token để deploy:
-- **CF Worker token** (deploy HTML + thao tác D1): cần xin từ user, đây là token account `chuannguyen@vietnambiz.com`
+- **CF Worker token** (deploy HTML + thao tác D1): cần xin từ user, đây là token account `<CF_MONITOR_ACCOUNT_EMAIL>`
 - Worker này cần có secret `CF_API_TOKEN` với quyền `Zone | Analytics | Read` cho **tất cả zones được monitor** — nếu thêm zone mới ở account khác, cần update secret này.
 
 ---
@@ -625,8 +625,8 @@ Token để deploy:
 
 ```bash
 CF_WORKER_TOKEN="<token>"
-CF_ACCOUNT_ID="71406b0b9ba6e16b7016960e084014a7"
-DB_ID="d48c3265-1df6-4b17-b872-c4543c95fc30"
+CF_ACCOUNT_ID="<CF_ACCOUNT_ID_MONITOR>"
+DB_ID="<CF_MONITOR_D1_ID>"
 ZONE_ID="<zone_id_cần_thêm>"
 DOMAIN="<domain.com>"
 
@@ -674,7 +674,7 @@ PYEOF
 
 # Deploy lên CF Pages project cf-monitor (account vietnambiz)
 CLOUDFLARE_API_TOKEN="$CF_WORKER_TOKEN" \
-CLOUDFLARE_ACCOUNT_ID="71406b0b9ba6e16b7016960e084014a7" \
+CLOUDFLARE_ACCOUNT_ID="<CF_ACCOUNT_ID_MONITOR>" \
 npx wrangler pages deploy /home/claude/cfm-site --project-name=cf-monitor
 ```
 
@@ -682,7 +682,7 @@ npx wrangler pages deploy /home/claude/cfm-site --project-name=cf-monitor
 
 ```bash
 # Trigger manual run
-curl -s "https://cf-monitor.chuannguyen.workers.dev/run"
+curl -s "https://<CF_MONITOR_WORKER_URL>/run"
 # Kết quả mong đợi: "Monitor ran successfully"
 
 # Verify snapshot đã có data (không phải toàn 0)
